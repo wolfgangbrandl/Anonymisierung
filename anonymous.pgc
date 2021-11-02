@@ -1,0 +1,133 @@
+#include <stdlib.h>
+#include <stdio.h>
+ 
+/* error handlers for the whole program */
+EXEC SQL WHENEVER SQLERROR CALL die();
+EXEC SQL WHENEVER NOT FOUND DO BREAK;
+ 
+static void error(void)
+{
+ /* avoid recursion on error */
+ EXEC SQL WHENEVER SQLERROR CONTINUE;
+
+ printf( "database error %s:\n%s\n", sqlca.sqlstate, sqlca.sqlerrm.sqlerrmc);
+
+ /* restore the original handler */
+ EXEC SQL WHENEVER SQLERROR CALL error();
+}
+static void die(void)
+{
+    /* avoid recursion on error */
+    EXEC SQL WHENEVER SQLERROR CONTINUE;
+ 
+    fprintf( stderr, "database error %s:\n%s\n", sqlca.sqlstate, sqlca.sqlerrm.sqlerrmc);
+    printf( "database error %s:\n%s\n", sqlca.sqlstate, sqlca.sqlerrm.sqlerrmc);
+ 
+    EXEC SQL ROLLBACK;
+    EXEC SQL DISCONNECT;
+ 
+    exit(1);
+ 
+    /* restore the original handler */
+    EXEC SQL WHENEVER SQLERROR CALL die();
+}
+ 
+int main(int argc, char **argv)
+{
+    int count;
+    int result;
+    EXEC SQL BEGIN DECLARE SECTION;
+    int v_person_id;
+    int v_first_name_ind, v_family_name_ind, v_gender_ind;
+    int r_first_name_ind, r_family_name_ind, r_gender_ind;
+    char v_first_name[41];
+    char v_family_name[41];
+    char v_gender[31];
+    char r_first_name[41];
+    char r_family_name[41];
+    char r_gender[31];
+    const char *rfirstname_stmt="select first_name,gender from pmdm.person_random order by random() limit 1";
+    const char *rfamilnyame_stmt="select family_name from pmdm.person_random order by random() limit 1";
+    EXEC SQL END DECLARE SECTION;
+    EXEC SQL WHENEVER SQLERROR CALL die(); 
+    /* connect to the database */
+    EXEC SQL CONNECT TO
+        tcp:postgresql://localhost:5452/pm2p?application_name=embedded
+        USER postgres;
+
+    /* Crteate tables for work */
+    /* this table holds one record for every combination of person_id, family_name,first_name and gender */
+    /* with this table we gerate a fetch with order random to get random values for the names and the gender which will than */
+    /* updated in the following tables which are copies of the original */
+
+    EXEC SQL WHENEVER SQLERROR CALL die(); 
+    EXEC SQL drop table pmdm.person_random cascade;
+    printf ("pmdm.person_random dropped cascaded\n");
+    EXEC SQL COMMIT;
+    EXEC SQL create table pmdm.person_random as select distinct person_id,first_name,family_name,gender from pmdm.person_data;
+    EXEC SQL CREATE INDEX num1 ON pmdm.person_random(person_id);
+    EXEC SQL COMMIT;
+    /* we make a copy of the person_data table, we could also directly anonymize the original table.*/
+    /* Be careful what you decide. Afterward to rename is crucial because there are a lot of dependencies*/
+    /* on the original table of views sequences etc. */
+    EXEC SQL WHENEVER SQLERROR CALL die(); 
+    EXEC SQL drop table pmdm.person_anonym cascade;
+    printf ("pmdm.person_anonym dropped cascaded\n");
+    EXEC SQL COMMIT;
+    EXEC SQL create table pmdm.person_anonym as select * from pmdm.person_data;
+    EXEC SQL CREATE INDEX num2 ON pmdm.person_anonym(person_id);
+    EXEC SQL COMMIT;
+    /* we make a copy of the person_data table, we could also directly anonymize the original table.*/
+    /* Be careful what you decide. Afterward to rename is crucial because there are a lot of dependencies*/
+    /* on the original table of views sequences etc. */
+
+    EXEC SQL WHENEVER SQLERROR CALL die(); 
+    EXEC SQL drop table pmdm.person_index_anonym cascade;
+    printf ("pmdm.person_index_anonym dropped cascaded\n");
+    EXEC SQL COMMIT;
+    EXEC SQL create table pmdm.person_index_anonym as select * from pmdm.person_index;
+    EXEC SQL CREATE INDEX num3 ON pmdm.person_index_anonym(person_id);
+    EXEC SQL COMMIT;
+
+    /* Declare Cursor */
+    EXEC SQL WHENEVER SQLERROR CALL die(); 
+    /* cursor on a select which get for every person_id one entry */
+    EXEC SQL DECLARE c CURSOR WITH HOLD FOR select distinct person_id from pmdm.person_random;
+    /* get random values for the names and the gender with the same number of counts as the cursor on person_id */
+    EXEC SQL DECLARE cr1 CURSOR WITH HOLD FOR select first_name,gender from pmdm.person_random order by random();
+    EXEC SQL DECLARE cr2 CURSOR WITH HOLD FOR select family_name from pmdm.person_random order by random();
+
+    /* open a cursor */
+    EXEC SQL OPEN c;
+    EXEC SQL OPEN cr1;
+    EXEC SQL OPEN cr2;
+ 
+    /* loop will be left if the cursor is done */
+    count=0;
+    for(;;) {
+      /* get the next result row */
+      EXEC SQL WHENEVER NOT FOUND DO BREAK;
+      EXEC SQL FETCH NEXT FROM c INTO :v_person_id ;
+      EXEC SQL FETCH NEXT FROM cr1 INTO :r_first_name :r_first_name_ind, :r_gender :r_gender_ind;
+      EXEC SQL FETCH NEXT FROM cr2 INTO :r_family_name :r_family_name_ind;
+
+
+      EXEC SQL WHENEVER NOT FOUND CONTINUE;
+      EXEC SQL update pmdm.person_anonym set first_name=:r_first_name, family_name=:r_family_name, gender=:r_gender where person_id=:v_person_id;
+      EXEC SQL update pmdm.person_index_anonym set first_name=:r_first_name, family_name=:r_family_name where person_id=:v_person_id;
+      /* commit every 10000 recordis; only possible because of the WITH HOLD clause in the cursor declare section */
+      if (!( count % 10000)) {
+        printf ("Count: %d \n",count);  
+        EXEC SQL COMMIT;
+      }
+      count++;
+    }
+    printf("End of anonymous\n"); 
+    EXEC SQL CLOSE c;
+    EXEC SQL CLOSE cr1;
+    EXEC SQL CLOSE cr2;
+    EXEC SQL COMMIT;
+    EXEC SQL DISCONNECT;
+ 
+    return 0;
+}
